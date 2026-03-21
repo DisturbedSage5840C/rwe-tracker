@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 248 250 252;
+  --foreground: 15 23 42;
+  --card: 255 255 255;
+  --card-foreground: 15 23 42;
+  --primary: 37 99 235;
+  --primary-foreground: 248 250 252;
+  --muted: 241 245 249;
+  --muted-foreground: 71 85 105;
+  --border: 226 232 240;
+  --ring: 37 99 235;
+  --destructive: 239 68 68;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900;
+  font-size: 14px;
+  line-height: 1.45;
+}

@@ -1,0 +1,145 @@
+# Local development composition for all RWE Tracker services.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rwe_tracker}
+      POSTGRES_USER: ${POSTGRES_USER:-rwe}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rwe}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rwe} -d ${POSTGRES_DB:-rwe_tracker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+  redis:
+    image: redis:7
+    env_file:
+      - ../.env
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+  nlp:
+    build:
+      context: ..
+      dockerfile: infra/docker/nlp.Dockerfile
+    env_file:
+      - ../.env
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+  api:
+    image: rwe-api-runtime:local
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+      target: runtime
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nlp:
+        condition: service_healthy
+    ports:
+      - "8000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        API_RUNTIME_IMAGE: rwe-api-runtime:local
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      nlp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A worker.celery_app inspect ping -d celery@$$HOSTNAME | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+  flower:
+    image: mher/flower:2.0.1
+    env_file:
+      - ../.env
+    command: ["celery", "--broker=${REDIS_URL:-redis://redis:6379/0}", "flower", "--port=5555", "--basic_auth=${FLOWER_BASIC_AUTH:-admin:admin}"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5555/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rwe-network
+
+volumes:
+  postgres_data:
+
+networks:
+  rwe-network:
+    driver: bridge

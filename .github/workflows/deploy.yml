@@ -1,0 +1,257 @@
+name: deploy
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_REGION: us-central1
+  ARTIFACT_REPO: rwe-tracker
+  API_SERVICE: rwe-api
+  NLP_SERVICE: rwe-nlp
+  WORKER_JOB: rwe-worker
+  MIGRATE_JOB: rwe-migrate
+
+jobs:
+  build-and-push:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      api_image: ${{ steps.meta.outputs.api_image }}
+      nlp_image: ${{ steps.meta.outputs.nlp_image }}
+      worker_image: ${{ steps.meta.outputs.worker_image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure docker auth for Artifact Registry
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      - name: Build metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::12}"
+          BASE="${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}"
+          echo "image_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "api_image=${BASE}/api:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "nlp_image=${BASE}/nlp:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "worker_image=${BASE}/worker:${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build API runtime image (targeted)
+        run: |
+          docker build \
+            -f infra/docker/api.Dockerfile \
+            --target runtime \
+            -t rwe-api-runtime:local \
+            -t "${{ steps.meta.outputs.api_image }}" \
+            -t "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/api:latest" \
+            .
+
+      - name: Build NLP image
+        run: |
+          docker build \
+            -f infra/docker/nlp.Dockerfile \
+            -t "${{ steps.meta.outputs.nlp_image }}" \
+            -t "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/nlp:latest" \
+            .
+
+      - name: Build Worker image
+        run: |
+          docker build \
+            -f infra/docker/worker.Dockerfile \
+            --build-arg API_RUNTIME_IMAGE=rwe-api-runtime:local \
+            -t "${{ steps.meta.outputs.worker_image }}" \
+            -t "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/worker:latest" \
+            .
+
+      - name: Push all images
+        run: |
+          docker push "${{ steps.meta.outputs.api_image }}"
+          docker push "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/api:latest"
+          docker push "${{ steps.meta.outputs.nlp_image }}"
+          docker push "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/nlp:latest"
+          docker push "${{ steps.meta.outputs.worker_image }}"
+          docker push "${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/worker:latest"
+
+  deploy-api:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      api_url: ${{ steps.deploy.outputs.url }}
+      migration_status: ${{ steps.migrate.outcome }}
+    steps:
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy API to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${API_SERVICE}" \
+            --image="${{ needs.build-and-push.outputs.api_image }}" \
+            --region="${GCP_REGION}" \
+            --platform=managed \
+            --min-instances=1 \
+            --max-instances=10 \
+            --memory=1Gi \
+            --cpu=1 \
+            --allow-unauthenticated \
+            --set-secrets="DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SECRET_KEY=SECRET_KEY:latest,OPENFDA_BASE_URL=OPENFDA_BASE_URL:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,NLP_SERVICE_URL=NLP_SERVICE_URL:latest" \
+            --quiet
+          URL="$(gcloud run services describe "${API_SERVICE}" --region="${GCP_REGION}" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Alembic migrations as Cloud Run Job
+        id: migrate
+        run: gcloud run jobs execute "${MIGRATE_JOB}" --region="${GCP_REGION}" --wait --quiet
+
+      - name: Smoke test API health
+        run: |
+          curl -fsS "${{ steps.deploy.outputs.url }}/health"
+
+  deploy-nlp:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      nlp_url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy NLP to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${NLP_SERVICE}" \
+            --image="${{ needs.build-and-push.outputs.nlp_image }}" \
+            --region="${GCP_REGION}" \
+            --platform=managed \
+            --min-instances=1 \
+            --max-instances=4 \
+            --memory=4Gi \
+            --cpu=2 \
+            --allow-unauthenticated \
+            --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
+            --quiet
+          URL="$(gcloud run services describe "${NLP_SERVICE}" --region="${GCP_REGION}" --format='value(status.url)')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+  deploy-worker:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      worker_image: ${{ needs.build-and-push.outputs.worker_image }}
+    steps:
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy worker Cloud Run Job
+        run: |
+          gcloud run jobs deploy "${WORKER_JOB}" \
+            --image="${{ needs.build-and-push.outputs.worker_image }}" \
+            --region="${GCP_REGION}" \
+            --tasks=1 \
+            --parallelism=1 \
+            --max-retries=3 \
+            --task-timeout=3600s \
+            --memory=2Gi \
+            --cpu=2 \
+            --set-secrets="DATABASE_URL=DATABASE_URL:latest,REDIS_URL=REDIS_URL:latest,SECRET_KEY=SECRET_KEY:latest,OPENFDA_BASE_URL=OPENFDA_BASE_URL:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,NLP_SERVICE_URL=NLP_SERVICE_URL:latest" \
+            --command="celery" \
+            --args="-A,worker.celery_app,worker,--loglevel=info,--concurrency=4,-Q,ingestion,analysis" \
+            --quiet
+
+  deploy-frontend:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      frontend_url: ${{ steps.vercel.outputs.url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Deploy frontend to Vercel
+        id: vercel
+        run: |
+          DEPLOY_OUTPUT="$(cd frontend && vercel --prod --token="${{ secrets.VERCEL_TOKEN }}" --yes)"
+          echo "${DEPLOY_OUTPUT}"
+          URL="$(echo "${DEPLOY_OUTPUT}" | tail -n 1 | tr -d '\r')"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+  notify:
+    needs: [deploy-api, deploy-nlp, deploy-worker, deploy-frontend]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Post deployment summary to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS_API="${{ needs.deploy-api.result }}"
+          STATUS_NLP="${{ needs.deploy-nlp.result }}"
+          STATUS_WORKER="${{ needs.deploy-worker.result }}"
+          STATUS_FE="${{ needs.deploy-frontend.result }}"
+          curl -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL" <<JSON
+          {
+            "text": "RWE Tracker deployment summary",
+            "blocks": [
+              {"type": "section", "text": {"type": "mrkdwn", "text": "*Deployment complete*"}},
+              {"type": "section", "text": {"type": "mrkdwn", "text": "*Git SHA:* ${GITHUB_SHA}\n*API:* ${{ needs.deploy-api.outputs.api_url }} (${STATUS_API})\n*NLP:* ${{ needs.deploy-nlp.outputs.nlp_url }} (${STATUS_NLP})\n*Worker Job Image:* ${{ needs.deploy-worker.outputs.worker_image }} (${STATUS_WORKER})\n*Frontend:* ${{ needs.deploy-frontend.outputs.frontend_url }} (${STATUS_FE})\n*Migration:* ${{ needs.deploy-api.outputs.migration_status }}"}}
+            ]
+          }
+JSON
