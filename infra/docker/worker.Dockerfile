@@ -6,16 +6,16 @@ FROM ${API_RUNTIME_IMAGE} AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/apps
+ENV PYTHONPATH=/app
 
-WORKDIR /app/apps
+WORKDIR /app
 
 USER root
 COPY apps/worker/requirements.txt /tmp/worker-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/worker-requirements.txt
 COPY apps /app/apps
-RUN chown -R appuser:appuser /app/apps
+RUN chown -R appuser:appuser /app
 
 USER appuser
 
-CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "--concurrency=4", "-Q", "ingestion,analysis"]
+CMD ["celery", "-A", "apps.worker.celery_app", "worker", "--loglevel=info", "--concurrency=4", "-Q", "ingestion,analysis,celery"]

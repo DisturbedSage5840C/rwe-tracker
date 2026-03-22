@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     nlp_max_batch_size: int = Field(default=500, alias="NLP_MAX_BATCH_SIZE")
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
     openfda_base_url: str = Field(alias="OPENFDA_BASE_URL")
+    openfda_max_pages: int = Field(default=8, alias="OPENFDA_MAX_PAGES")
+    clinical_trials_max_pages: int = Field(default=12, alias="CLINICAL_TRIALS_MAX_PAGES")
 
     reddit_client_id: str = Field(default="", alias="REDDIT_CLIENT_ID")
     reddit_client_secret: str = Field(default="", alias="REDDIT_CLIENT_SECRET")

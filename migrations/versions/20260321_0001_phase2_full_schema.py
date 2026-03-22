@@ -23,7 +23,7 @@ def upgrade() -> None:
     """Create complete Phase 2 schema with tenant isolation and soft deletes."""
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
-    user_role = sa.Enum("OWNER", "ADMIN", "ANALYST", "VIEWER", name="user_role")
+    user_role = postgresql.ENUM("OWNER", "ADMIN", "ANALYST", "VIEWER", name="user_role", create_type=False)
     user_role.create(op.get_bind(), checkfirst=True)
 
     op.create_table(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from celery import Celery
+from kombu import Queue
 
 from apps.api.config import get_settings
 from apps.common.logging import configure_logging
@@ -26,4 +27,15 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    task_default_queue="analysis",
+    task_queues=(
+        Queue("analysis"),
+        Queue("ingestion"),
+        Queue("celery"),
+    ),
+    task_routes={
+        "analysis.*": {"queue": "analysis"},
+        "ingestion.*": {"queue": "ingestion"},
+        "celery.chord_unlock": {"queue": "analysis"},
+    },
 )

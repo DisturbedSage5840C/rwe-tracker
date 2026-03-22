@@ -7,16 +7,16 @@ import secrets
 
 from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
-    """Hash a plaintext password using bcrypt."""
+    """Hash a plaintext password using passlib's PBKDF2-SHA256 scheme."""
     return pwd_context.hash(password)
 
 
 def verify_password(password: str, hashed_password: str) -> bool:
-    """Verify plaintext password against bcrypt hash."""
+    """Verify plaintext password against stored passlib hash."""
     return pwd_context.verify(password, hashed_password)
 
 

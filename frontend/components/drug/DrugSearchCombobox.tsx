@@ -6,6 +6,7 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Check, ChevronsUpDown, Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import { api, type DrugRead } from "@/lib/api";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -36,6 +37,7 @@ export function DrugSearchCombobox({
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const timer = useRef<number | null>(null);
   const token = useAuthStore((state) => state.accessToken);
 
@@ -68,18 +70,27 @@ export function DrugSearchCombobox({
 
   const onCreateDrug = form.handleSubmit(async (values) => {
     if (!token) {
+      toast.error("Please sign in to create a monitored drug");
       return;
     }
-    api.setAccessToken(token);
-    const created = await api.createDrug({
-      name: values.name,
-      indication: values.indication ?? null,
-      manufacturer: values.manufacturer ?? null,
-    });
-    await mutate();
-    onChange(created.data);
-    setCreateOpen(false);
-    form.reset();
+    setIsCreating(true);
+    try {
+      api.setAccessToken(token);
+      const created = await api.createDrug({
+        name: values.name,
+        indication: values.indication ?? null,
+        manufacturer: values.manufacturer ?? null,
+      });
+      await mutate();
+      onChange(created.data);
+      setCreateOpen(false);
+      form.reset();
+      toast.success("Drug created successfully");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create drug");
+    } finally {
+      setIsCreating(false);
+    }
   });
 
   return (
@@ -116,7 +127,13 @@ export function DrugSearchCombobox({
                     <Check className={cn("h-4 w-4", value === drug.name ? "opacity-100" : "opacity-0")} />
                     <div className="flex flex-col">
                       <span>{drug.name}</span>
-                      <span className="text-[12px] text-slate-500">{drug.indication ?? "Therapeutic area unavailable"}</span>
+                      <span className="text-[12px] text-slate-500">
+                        {(drug.indication && drug.indication.trim()) || "Therapeutic area unavailable"}
+                        {" • "}
+                        {(drug.manufacturer && drug.manufacturer.trim()) || "Unknown manufacturer"}
+                        {" • "}
+                        {new Date(drug.created_at).toLocaleString()}
+                      </span>
                     </div>
                   </CommandItem>
                 ))}
@@ -177,7 +194,9 @@ export function DrugSearchCombobox({
                 )}
               />
               <DialogFooter>
-                <Button aria-label="Create drug" type="submit">Create</Button>
+                <Button aria-label="Create drug" type="submit" disabled={isCreating}>
+                  {isCreating ? "Creating..." : "Create"}
+                </Button>
               </DialogFooter>
             </form>
           </Form>

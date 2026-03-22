@@ -48,6 +48,10 @@ class AuthService:
         if existing_org:
             raise ValidationAppError("Organization slug already exists")
 
+        existing_org_name = await self.organization_repository.get_by_name(payload.organization_name)
+        if existing_org_name:
+            raise ValidationAppError("Organization name already exists")
+
         existing_user = await self.user_repository.get_by_email(payload.email)
         if existing_user:
             raise ValidationAppError("Email already registered")

@@ -27,7 +27,8 @@ class PharmaSentimentPipeline:
 
         self.vader: Any | None = None
         self.tokenizer = None
-        self.transformer_ort = None
+        self.model = None
+        self.classifier = None
         self.sentence_encoder: Any | None = None
 
         self.label_map = {0: "negative", 1: "neutral", 2: "positive"}
@@ -40,7 +41,21 @@ class PharmaSentimentPipeline:
         }
 
     async def load(self):
+        from nltk import download
+        from nltk.sentiment import SentimentIntensityAnalyzer
+        from sentence_transformers import SentenceTransformer
         from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+
+        try:
+            self.vader = SentimentIntensityAnalyzer()
+        except LookupError:
+            download("vader_lexicon", quiet=True)
+            self.vader = SentimentIntensityAnalyzer()
+
+        lexicon_path = Path(__file__).resolve().parents[1] / "config" / "nlp_lexicon.json"
+        custom_lexicon = json.loads(lexicon_path.read_text(encoding="utf-8"))
+        self.vader.lexicon.update(custom_lexicon)
+
         model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
@@ -51,13 +66,18 @@ class PharmaSentimentPipeline:
             device=-1  # CPU
         )
 
+        self.sentence_encoder = SentenceTransformer(
+            self.settings.sentence_model_name,
+            cache_folder=str(self.model_cache_dir),
+        )
+
     def loaded_models(self) -> list[str]:
         """Return names of models that are loaded in memory."""
         loaded: list[str] = []
         if self.vader is not None:
             loaded.append("vader")
-        if self.transformer_ort is not None:
-            loaded.append("cardiffnlp/twitter-roberta-base-sentiment-latest-onnx")
+        if self.classifier is not None:
+            loaded.append("cardiffnlp/twitter-roberta-base-sentiment-latest")
         if self.sentence_encoder is not None:
             loaded.append("sentence-transformers/all-MiniLM-L6-v2")
         return loaded
@@ -67,25 +87,22 @@ class PharmaSentimentPipeline:
         started = time.perf_counter()
         vader_score = float(self.vader.polarity_scores(text)["compound"])
 
-        tokens = self.tokenizer(
-            text,
-            truncation=True,
-            max_length=512,
-            return_tensors="pt",
-        )
-
         # Overflow is expected on long social text; we truncate to keep service resilient.
         approximate_tokens = len(text.split())
         if approximate_tokens > 512:
             logger.warning("token_overflow_truncated", approximate_tokens=approximate_tokens, max_length=512)
 
-        ort_outputs = self.transformer_ort(**tokens)
-        logits = ort_outputs.logits.detach().cpu().numpy()[0]
-        probabilities = self._softmax(logits)
-        transformer_index = int(np.argmax(probabilities))
-        transformer_label = self.label_map.get(transformer_index, "neutral")
-        transformer_confidence = float(probabilities[transformer_index])
-        transformer_normalized = float(probabilities[2] - probabilities[0])
+        inference_raw = self.classifier(text, truncation=True, max_length=512, top_k=None)
+        if isinstance(inference_raw, dict):
+            inference = [inference_raw]
+        elif inference_raw and isinstance(inference_raw[0], dict):
+            inference = inference_raw
+        else:
+            inference = inference_raw[0]
+        label_scores = {entry["label"].lower(): float(entry["score"]) for entry in inference}
+        transformer_label = max(label_scores, key=label_scores.get)
+        transformer_confidence = float(label_scores[transformer_label])
+        transformer_normalized = float(label_scores.get("positive", 0.0) - label_scores.get("negative", 0.0))
 
         aspects = self._extract_aspects(text)
         aspect_values = [aspect.sentiment for aspect in aspects.values() if aspect.sentiment is not None]
@@ -145,9 +162,3 @@ class PharmaSentimentPipeline:
         """Lightweight sentence splitter to avoid heavyweight NLP parser overhead."""
         return [segment.strip() for segment in re.split(r"[.!?]+", text) if segment.strip()]
 
-    @staticmethod
-    def _softmax(logits: np.ndarray) -> np.ndarray:
-        """Compute numerically-stable softmax probabilities."""
-        stabilized = logits - np.max(logits)
-        exps = np.exp(stabilized)
-        return exps / np.sum(exps)

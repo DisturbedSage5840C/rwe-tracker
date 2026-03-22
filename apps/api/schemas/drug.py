@@ -65,6 +65,7 @@ class PerceptionReportRead(BaseModel):
     sample_size_reviews: int
     sample_size_social: int
     methodology_version: str
+    payload: dict
     created_at: datetime
 
 

@@ -12,6 +12,7 @@ from apps.api.config import get_settings
 from apps.api.db import SessionLocal
 
 settings = get_settings()
+_worker_loop: asyncio.AbstractEventLoop | None = None
 
 
 @asynccontextmanager
@@ -42,5 +43,10 @@ async def with_retry(func, *args, **kwargs):
 
 
 def run_async(coro):
-    """Run coroutine in Celery sync context when needed."""
-    return asyncio.run(coro)
+    """Run coroutine in Celery sync context using a process-local loop."""
+    global _worker_loop
+    if _worker_loop is None or _worker_loop.is_closed():
+        _worker_loop = asyncio.new_event_loop()
+
+    asyncio.set_event_loop(_worker_loop)
+    return _worker_loop.run_until_complete(coro)

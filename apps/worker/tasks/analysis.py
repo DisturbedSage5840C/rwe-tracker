@@ -15,14 +15,19 @@ from apps.api.models.perception_report import PerceptionReport
 from apps.api.models.social_mention import SocialMention
 from apps.common.logging import get_logger
 from apps.worker.celery_app import celery_app
-from apps.worker.tasks.utils import db_session, set_job_progress, set_job_result, with_retry
+from apps.worker.tasks.utils import db_session, run_async, set_job_progress, set_job_result, with_retry
 
 logger = get_logger(__name__)
 settings = get_settings()
 
 
 @celery_app.task(name="analysis.run_gap_analysis", bind=True)
-async def run_gap_analysis(self, _ingestion_results: list[dict], drug_id: str, org_id: str) -> dict:
+def run_gap_analysis(self, _ingestion_results: list[dict], drug_id: str, org_id: str) -> dict:
+    """Sync Celery wrapper around async analysis implementation."""
+    return run_async(_run_gap_analysis(self, _ingestion_results, drug_id, org_id))
+
+
+async def _run_gap_analysis(self, _ingestion_results: list[dict], drug_id: str, org_id: str) -> dict:
     """Enrich raw text with NLP predictions and persist final gap report."""
     task_id = self.request.id
     await set_job_progress(task_id, 5)
@@ -108,6 +113,15 @@ async def run_gap_analysis(self, _ingestion_results: list[dict], drug_id: str, o
         reviews = list((await session.execute(select(PatientReview).where(PatientReview.drug_id == UUID(drug_id)))).scalars().all())
         social = list((await session.execute(select(SocialMention).where(SocialMention.drug_id == UUID(drug_id)))).scalars().all())
 
+        source_metrics = {
+            "ingestion": _ingestion_results,
+            "counts": {
+                "reviews": len(reviews),
+                "social_mentions": len(social),
+                "clinical_trials": len(trials),
+            },
+        }
+
         clinical_data = {
             "efficacy": float(sum([1.0 - (t.adverse_event_rate or 0.0) for t in trials]) / max(len(trials), 1)),
             "safety": float(sum([1.0 - (t.adverse_event_rate or 0.0) for t in trials]) / max(len(trials), 1)),
@@ -163,6 +177,7 @@ async def run_gap_analysis(self, _ingestion_results: list[dict], drug_id: str, o
         payload = {
             "dimensions": dimensions,
             "insights": gap_report.get("insights", []),
+            "source_metrics": source_metrics,
             "org_id": org_id,
             "generated_at": datetime.now(UTC).isoformat(),
         }

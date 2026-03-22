@@ -23,6 +23,7 @@ class ClinicalTrial(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
         nullable=False,
         index=True,
     )
+    trial_identifier: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     nct_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     phase: Mapped[str | None] = mapped_column(String(64), nullable=True)

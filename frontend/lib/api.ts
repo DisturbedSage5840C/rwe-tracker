@@ -113,6 +113,11 @@ export type PerceptionReportRead = {
   sample_size_reviews: number;
   sample_size_social: number;
   methodology_version: string;
+  payload: {
+    dimensions?: GapDimension[];
+    insights?: InsightItem[];
+    [key: string]: unknown;
+  };
   created_at: string;
 };
 
@@ -154,7 +159,7 @@ export type TrendResponse = {
 };
 
 export type GapDimension = {
-  dimension: "efficacy" | "safety" | "tolerability" | "convenience" | "quality_of_life";
+  dimension: "efficacy" | "safety" | "tolerability" | "convenience" | "quality_of_life" | "adherence" | "trust";
   clinical_score: number;
   real_world_score: number;
   gap_magnitude: number;
@@ -194,7 +199,11 @@ type RequestOptions = {
   body?: unknown;
   query?: Record<string, string | number | undefined | null>;
   skipAuth?: boolean;
+  timeoutMs?: number;
 };
+
+const AUTH_INVALID_EVENT = "rwe:auth-invalid";
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 
 export class RWEApiClient {
   private readonly baseUrl: string;
@@ -220,24 +229,65 @@ export class RWEApiClient {
     return url.toString();
   }
 
+  private async fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      return await fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("Request timed out. Please try again.");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   private async request<T>(path: string, options: RequestOptions = {}, allowRefresh = true): Promise<T> {
     const headers = new Headers({ "Content-Type": "application/json" });
     if (!options.skipAuth && this.accessToken) {
       headers.set("Authorization", `Bearer ${this.accessToken}`);
     }
 
-    const response = await fetch(this.buildUrl(path, options.query), {
+    const response = await this.fetchWithTimeout(
+      this.buildUrl(path, options.query),
+      {
       method: options.method ?? "GET",
       headers,
       credentials: "include",
       body: options.body ? JSON.stringify(options.body) : undefined,
       cache: "no-store",
-    });
+      },
+      options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    );
 
     if (response.status === 401 && allowRefresh && !options.skipAuth) {
-      const refreshed = await this.refreshAccessToken();
+      let refreshed = false;
+      try {
+        refreshed = await this.refreshAccessToken();
+      } catch {
+        refreshed = false;
+      }
       if (refreshed) {
         return this.request<T>(path, options, false);
+      }
+      this.accessToken = null;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(AUTH_INVALID_EVENT));
+      }
+    }
+
+    if ((response.status === 401 || response.status === 403) && !options.skipAuth) {
+      this.accessToken = null;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(AUTH_INVALID_EVENT));
       }
     }
 
@@ -245,6 +295,23 @@ export class RWEApiClient {
       const fallback = `Request failed with status ${response.status}`;
       const payload = (await response.json().catch(() => null)) as APIEnvelope<unknown> | null;
       const message = payload?.errors?.[0]?.message ?? fallback;
+      const normalizedMessage = message.toLowerCase();
+      const isAuthError =
+        !options.skipAuth &&
+        (response.status === 401 ||
+          response.status === 403 ||
+          normalizedMessage.includes("invalid authentication") ||
+          normalizedMessage.includes("credentials") ||
+          normalizedMessage.includes("not authenticated"));
+
+      if (isAuthError) {
+        this.accessToken = null;
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent(AUTH_INVALID_EVENT));
+        }
+        throw new Error("Session expired. Please sign in again.");
+      }
+
       throw new Error(message);
     }
 
@@ -252,14 +319,21 @@ export class RWEApiClient {
   }
 
   private async refreshAccessToken(): Promise<boolean> {
-    const response = await fetch("/api/auth/refresh", {
-      method: "POST",
-      credentials: "include",
-      cache: "no-store",
-    });
+    const response = await this.fetchWithTimeout(
+      "/api/auth/refresh",
+      {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+      },
+      10000,
+    );
 
     if (!response.ok) {
       this.accessToken = null;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent(AUTH_INVALID_EVENT));
+      }
       return false;
     }
 

@@ -29,6 +29,8 @@ const axisLabels: Record<GapDimension["dimension"], string> = {
   tolerability: "Tolerability",
   convenience: "Convenience",
   quality_of_life: "Quality of Life",
+  adherence: "Adherence",
+  trust: "Trust",
 };
 
 function normalize(value: number): number {

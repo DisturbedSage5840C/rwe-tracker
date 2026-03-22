@@ -40,6 +40,12 @@ class OrganizationRepository:
         result = await self.session.execute(statement)
         return result.scalar_one_or_none()
 
+    async def get_by_name(self, name: str) -> Organization | None:
+        """Fetch organization by unique display name."""
+        statement = select(Organization).where(Organization.name == name, Organization.is_deleted.is_(False))
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
+
     async def get_by_id(self, organization_id: uuid.UUID) -> Organization | None:
         """Fetch organization by ID."""
         statement = select(Organization).where(Organization.id == organization_id, Organization.is_deleted.is_(False))
@@ -331,6 +337,21 @@ class AnalysisJobRepository:
             AnalysisJob.organization_id == organization_id,
             AnalysisJob.drug_id == drug_id,
             AnalysisJob.is_deleted.is_(False),
+        )
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def get_latest_for_drug(self, organization_id: uuid.UUID, drug_id: uuid.UUID) -> AnalysisJob | None:
+        """Fetch newest analysis job row for a tenant/drug pair."""
+        statement = (
+            select(AnalysisJob)
+            .where(
+                AnalysisJob.organization_id == organization_id,
+                AnalysisJob.drug_id == drug_id,
+                AnalysisJob.is_deleted.is_(False),
+            )
+            .order_by(AnalysisJob.created_at.desc())
+            .limit(1)
         )
         result = await self.session.execute(statement)
         return result.scalar_one_or_none()

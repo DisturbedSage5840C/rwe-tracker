@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import useSWR from "swr";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { format } from "date-fns";
@@ -22,8 +22,10 @@ import { useDrugAnalysis } from "@/lib/hooks/useDrugAnalysis";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 export default function DrugDetailPage() {
+  const router = useRouter();
   const params = useParams<{ drugId: string }>();
   const token = useAuthStore((state) => state.accessToken);
+  const hydrated = useAuthStore((state) => state.hydrated);
   const drugId = params.drugId;
 
   const analysis = useDrugAnalysis(drugId);
@@ -57,6 +59,36 @@ export default function DrugDetailPage() {
     },
     { revalidateOnFocus: false },
   );
+
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    if (!token) {
+      toast.error("Sign in required to access this page");
+      router.replace("/login");
+    }
+  }, [hydrated, token, router]);
+
+  const resolvedReport = analysis.report
+    ? analysis.report
+    : drugQuery.data?.latest_report
+      ? {
+          id: drugQuery.data.latest_report.id,
+          perceptionScore: drugQuery.data.latest_report.perception_score,
+          trialScore: drugQuery.data.latest_report.trial_score,
+          gapScore: drugQuery.data.latest_report.gap_score,
+          generatedAt: drugQuery.data.latest_report.created_at,
+          sampleSizeReviews: 0,
+          sampleSizeSocial: 0,
+        }
+      : null;
+
+  const pageError =
+    (drugQuery.error as Error | undefined) ??
+    (reportsQuery.error as Error | undefined) ??
+    (trendsQuery.error as Error | undefined) ??
+    analysis.error;
 
   const reviewRows = useMemo(() => {
     const sampleSize = analysis.report ? Math.max(analysis.report.gapScore > 0 ? 250 : 80, 80) : 80;
@@ -94,6 +126,16 @@ export default function DrugDetailPage() {
       toast.error(error instanceof Error ? error.message : "Unable to export report");
     }
   };
+
+  if (!hydrated || !token) {
+    return (
+      <main className="min-h-screen bg-slate-50 px-8 py-8">
+        <div className="mx-auto max-w-[1440px] rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">
+          Preparing secure session...
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-slate-50 px-8 py-8">
@@ -136,13 +178,28 @@ export default function DrugDetailPage() {
             </TabsList>
 
             <TabsContent value="overview" className="space-y-4">
-              <DrugOverviewCard
-                perceptionScore={analysis.report?.perceptionScore ?? 0}
-                trialScore={analysis.report?.trialScore ?? 0}
-                gapScore={analysis.report?.gapScore ?? 0}
-                isLoading={analysis.isLoading}
-              />
-              <InsightsList insights={analysis.insights} isLoading={analysis.isLoading} sendPrompt={(prompt) => toast.message(`Ask AI: ${prompt}`)} />
+              {pageError ? (
+                <Card>
+                  <CardContent className="p-6 text-[13px] text-red-600">Unable to load drug analysis data: {pageError.message}</CardContent>
+                </Card>
+              ) : resolvedReport ? (
+                <>
+                  <DrugOverviewCard
+                    perceptionScore={resolvedReport.perceptionScore}
+                    trialScore={resolvedReport.trialScore}
+                    gapScore={resolvedReport.gapScore}
+                    isLoading={analysis.isLoading}
+                  />
+                  <InsightsList insights={analysis.insights} isLoading={analysis.isLoading} sendPrompt={(prompt) => toast.message(`Ask AI: ${prompt}`)} />
+                </>
+              ) : (
+                <Card>
+                  <CardContent className="space-y-2 p-6 text-[13px] text-slate-600">
+                    <p>No analysis report found for this drug yet.</p>
+                    <p className="text-slate-500">Run Analyze from the dashboard for this exact drug record, then refresh this page.</p>
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
 
             <TabsContent value="gaps">
@@ -212,12 +269,16 @@ export default function DrugDetailPage() {
                     <Button aria-label="Download reports as CSV" variant="outline" onClick={() => exportFile("csv")}>Download CSV</Button>
                   </div>
                   <div className="space-y-2 text-[13px]">
-                    {(reportsQuery.data ?? []).map((report) => (
-                      <div key={report.id} className="rounded-md border border-slate-200 p-3">
-                        <p className="font-medium">{format(new Date(report.created_at), "PPpp")}</p>
-                        <p className="text-slate-600">Perception {(report.perception_score * 100).toFixed(2)}% | Gap {(report.gap_score * 100).toFixed(2)}%</p>
-                      </div>
-                    ))}
+                    {(reportsQuery.data ?? []).length === 0 ? (
+                      <p className="text-slate-500">No reports generated for this drug yet.</p>
+                    ) : (
+                      (reportsQuery.data ?? []).map((report) => (
+                        <div key={report.id} className="rounded-md border border-slate-200 p-3">
+                          <p className="font-medium">{format(new Date(report.created_at), "PPpp")}</p>
+                          <p className="text-slate-600">Perception {(report.perception_score * 100).toFixed(2)}% | Gap {(report.gap_score * 100).toFixed(2)}%</p>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </CardContent>
               </Card>

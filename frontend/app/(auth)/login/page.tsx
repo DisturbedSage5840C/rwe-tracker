@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -35,6 +35,28 @@ export default function LoginPage() {
     },
   });
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const email = params.get("email");
+    const expired = params.get("expired");
+    if (email) {
+      form.reset({
+        email: email ?? "",
+        password: "",
+      });
+
+      const scrubbedParams = new URLSearchParams(window.location.search);
+      scrubbedParams.delete("email");
+      scrubbedParams.delete("password");
+      const scrubbedQuery = scrubbedParams.toString();
+      const scrubbedUrl = `${window.location.pathname}${scrubbedQuery ? `?${scrubbedQuery}` : ""}`;
+      window.history.replaceState({}, "", scrubbedUrl);
+    }
+    if (expired === "1") {
+      toast.error("Session expired. Please sign in again.");
+    }
+  }, [form]);
+
   const onSubmit = form.handleSubmit(async (values) => {
     setIsSubmitting(true);
     try {
@@ -65,6 +87,8 @@ export default function LoginPage() {
     } finally {
       setIsSubmitting(false);
     }
+  }, () => {
+    toast.error("Enter a valid email and password to continue");
   });
 
   return (

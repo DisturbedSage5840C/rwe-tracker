@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import asyncpraw
+import asyncprawcore
 import httpx
 from celery import chord
 from sqlalchemy import select
@@ -17,7 +18,7 @@ from apps.api.models.patient_review import PatientReview
 from apps.api.models.social_mention import SocialMention
 from apps.common.logging import get_logger
 from apps.worker.celery_app import celery_app
-from apps.worker.tasks.utils import db_session, set_job_progress, with_retry
+from apps.worker.tasks.utils import db_session, run_async, set_job_progress, with_retry
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -56,15 +57,24 @@ def _derive_openfda_sentiment(report: dict) -> float:
 
 
 @celery_app.task(name="ingestion.openfda", bind=True)
-async def ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dict:
+def ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dict:
+    """Sync Celery wrapper around async ingestion implementation."""
+    return run_async(_ingest_openfda(self, drug_name, org_id, drug_id))
+
+
+async def _ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dict:
     """Ingest OpenFDA adverse events and map to PatientReview rows idempotently."""
     created = 0
     offset = 0
     page = 0
     task_id = self.request.id
+    max_pages = max(1, settings.openfda_max_pages)
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         while True:
+            if page >= max_pages:
+                logger.info("openfda_page_cap_reached", max_pages=max_pages, drug_name=drug_name)
+                break
             params = {
                 "search": f'patient.drug.medicinalproduct:"{drug_name}"',
                 "limit": 100,
@@ -81,10 +91,11 @@ async def ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dic
 
             async with db_session() as session:
                 for report in results:
-                    external_id = report.get("safetyreportid")
-                    if external_id:
+                    raw_external_id = report.get("safetyreportid")
+                    scoped_external_id = f"{drug_id}:openfda:{raw_external_id}" if raw_external_id else None
+                    if scoped_external_id:
                         existing = await session.execute(
-                            select(PatientReview.id).where(PatientReview.external_id == external_id)
+                            select(PatientReview.id).where(PatientReview.external_id == scoped_external_id)
                         )
                         if existing.scalar_one_or_none():
                             continue
@@ -96,7 +107,7 @@ async def ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dic
                     review = PatientReview(
                         drug_id=UUID(drug_id),
                         source="openfda",
-                        external_id=external_id,
+                        external_id=scoped_external_id,
                         review_text=reaction_text,
                         review_date=_parse_fda_date(report.get("receivedate")),
                         crawled_at=datetime.now(UTC),
@@ -123,8 +134,17 @@ async def ingest_openfda(self, drug_name: str, org_id: str, drug_id: str) -> dic
 
 
 @celery_app.task(name="ingestion.reddit", bind=True)
-async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict:
+def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict:
+    """Sync Celery wrapper around async ingestion implementation."""
+    return run_async(_ingest_reddit(self, drug_name, org_id, drug_id))
+
+
+async def _ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict:
     """Ingest Reddit posts/comments mentioning drug and map to SocialMention rows."""
+
+    if not settings.reddit_client_id or not settings.reddit_client_secret:
+        logger.warning("reddit_ingestion_missing_credentials_using_public_fallback")
+        return await _ingest_reddit_public_fallback(self.request.id, drug_name, org_id, drug_id, reason="missing_credentials")
 
     created = 0
     scanned = 0
@@ -145,15 +165,14 @@ async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict
                     if drug_name.lower() not in text_blob.lower():
                         continue
 
-                    existing = await session.execute(
-                        select(SocialMention.id).where(SocialMention.external_id == submission.id)
-                    )
+                    submission_external_id = f"{drug_id}:reddit_post:{submission.id}"
+                    existing = await session.execute(select(SocialMention.id).where(SocialMention.external_id == submission_external_id))
                     if not existing.scalar_one_or_none():
                         session.add(
                             SocialMention(
                                 drug_id=UUID(drug_id),
                                 platform="reddit",
-                                external_id=submission.id,
+                                external_id=submission_external_id,
                                 post_id=submission.id,
                                 author_handle=str(submission.author) if submission.author else None,
                                 source_url=f"https://reddit.com{submission.permalink}",
@@ -175,9 +194,8 @@ async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict
                             continue
                         comment_count += 1
 
-                        comment_existing = await session.execute(
-                            select(SocialMention.id).where(SocialMention.external_id == comment.id)
-                        )
+                        comment_external_id = f"{drug_id}:reddit_comment:{comment.id}"
+                        comment_existing = await session.execute(select(SocialMention.id).where(SocialMention.external_id == comment_external_id))
                         if comment_existing.scalar_one_or_none():
                             continue
 
@@ -185,7 +203,7 @@ async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict
                             SocialMention(
                                 drug_id=UUID(drug_id),
                                 platform="reddit",
-                                external_id=comment.id,
+                                external_id=comment_external_id,
                                 post_id=submission.id,
                                 author_handle=str(comment.author) if comment.author else None,
                                 source_url=f"https://reddit.com{comment.permalink}",
@@ -200,6 +218,9 @@ async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict
 
                 await session.commit()
                 await set_job_progress(task_id, min(95, idx * 12))
+    except asyncprawcore.AsyncPrawcoreException as exc:
+        logger.warning("reddit_ingestion_auth_error_using_public_fallback", detail=str(exc))
+        return await _ingest_reddit_public_fallback(self.request.id, drug_name, org_id, drug_id, reason="auth_error")
     finally:
         await reddit.close()
 
@@ -207,16 +228,130 @@ async def ingest_reddit(self, drug_name: str, org_id: str, drug_id: str) -> dict
     return {"status": "ok", "source": "reddit", "created": created, "scanned": scanned}
 
 
+async def _ingest_reddit_public_fallback(task_id: str, drug_name: str, org_id: str, drug_id: str, reason: str) -> dict:
+    """Fallback Reddit ingestion via public JSON search endpoint when OAuth credentials are unavailable."""
+
+    created = 0
+    scanned = 0
+
+    headers = {
+        "User-Agent": settings.reddit_user_agent,
+        "Accept": "application/json",
+    }
+    params = {
+        "q": drug_name,
+        "sort": "new",
+        "limit": 75,
+        "restrict_sr": "false",
+        "t": "all",
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0), headers=headers, follow_redirects=True) as client:
+        try:
+            response = await with_retry(client.get, "https://www.reddit.com/search.json", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001 - fallback should never crash ingestion chord
+            logger.warning("reddit_public_fallback_failed", detail=str(exc))
+            await set_job_progress(task_id, 100)
+            return {
+                "status": "skipped",
+                "source": "reddit",
+                "reason": f"public_fallback_failed:{reason}",
+                "created": 0,
+                "scanned": 0,
+            }
+
+    children = ((payload.get("data") or {}).get("children") or []) if isinstance(payload, dict) else []
+
+    async with db_session() as session:
+        for idx, item in enumerate(children, start=1):
+            post = item.get("data") if isinstance(item, dict) else None
+            if not isinstance(post, dict):
+                continue
+
+            scanned += 1
+            title = str(post.get("title") or "")
+            body = str(post.get("selftext") or "")
+            content = f"{title}\n{body}".strip()
+
+            if drug_name.lower() not in content.lower():
+                continue
+
+            reddit_id = str(post.get("id") or "")
+            permalink = str(post.get("permalink") or "")
+            if not reddit_id:
+                continue
+
+            external_id = f"{drug_id}:reddit_public_post:{reddit_id}"
+            existing = await session.execute(select(SocialMention.id).where(SocialMention.external_id == external_id))
+            if existing.scalar_one_or_none():
+                continue
+
+            created_utc = post.get("created_utc")
+            created_at = datetime.now(UTC)
+            if isinstance(created_utc, (int, float)):
+                created_at = datetime.fromtimestamp(created_utc, tz=UTC)
+
+            session.add(
+                SocialMention(
+                    drug_id=UUID(drug_id),
+                    platform="reddit",
+                    external_id=external_id,
+                    post_id=reddit_id,
+                    author_handle=str(post.get("author") or "") or None,
+                    source_url=f"https://reddit.com{permalink}" if permalink else None,
+                    content=content,
+                    mention_date=created_at,
+                    posted_at=created_at,
+                    engagement_score=float(post.get("score") or 0.0),
+                    mention_metadata={
+                        "org_id": org_id,
+                        "fallback": "reddit_public_json",
+                        "ingestion_reason": reason,
+                    },
+                )
+            )
+            created += 1
+
+            if idx % 20 == 0:
+                await session.flush()
+                await set_job_progress(task_id, min(95, 10 + idx))
+
+        await session.commit()
+
+    await set_job_progress(task_id, 100)
+    return {
+        "status": "ok",
+        "source": "reddit",
+        "mode": "public_fallback",
+        "reason": reason,
+        "created": created,
+        "scanned": scanned,
+    }
+
+
 @celery_app.task(name="ingestion.clinical_trials", bind=True)
-async def ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
+def ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
+    """Sync Celery wrapper around async ingestion implementation."""
+    return run_async(_ingest_clinical_trials(self, drug_name, drug_id))
+
+
+async def _ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
     """Ingest ClinicalTrials.gov completed studies and upsert by nct_id."""
 
     created_or_updated = 0
     page_token: str | None = None
+    seen_tokens: set[str] = set()
+    page_count = 0
+    max_pages = max(1, settings.clinical_trials_max_pages)
     task_id = self.request.id
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         while True:
+            if page_count >= max_pages:
+                logger.info("clinical_trials_page_cap_reached", max_pages=max_pages, drug_name=drug_name)
+                break
             params = {
                 "query.term": drug_name,
                 "filter.overallStatus": "COMPLETED",
@@ -244,6 +379,9 @@ async def ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
                     if not nct_id:
                         continue
 
+                    # Scope unique identifier by drug to prevent cross-drug upsert collisions.
+                    scoped_nct_id = f"{drug_id}:{nct_id}"
+
                     serious_events = results.get("seriousEvents", [])
                     total_affected = 0
                     total_risk = 0
@@ -258,7 +396,8 @@ async def ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
 
                     upsert_stmt = insert(ClinicalTrial).values(
                         drug_id=UUID(drug_id),
-                        nct_id=nct_id,
+                        trial_identifier=nct_id,
+                        nct_id=scoped_nct_id,
                         title=ident.get("briefTitle", "Untitled trial"),
                         phase=(design_phase := protocol.get("designModule", {}).get("phases", [None])[0]),
                         status=status.get("overallStatus"),
@@ -290,9 +429,14 @@ async def ingest_clinical_trials(self, drug_name: str, drug_id: str) -> dict:
 
                 await session.commit()
 
+            page_count += 1
             page_token = payload.get("nextPageToken")
             if not page_token:
                 break
+            if page_token in seen_tokens:
+                logger.warning("clinical_trials_page_token_cycle", token=page_token, drug_name=drug_name)
+                break
+            seen_tokens.add(page_token)
 
     await set_job_progress(task_id, 100)
     return {"status": "ok", "source": "clinical_trials", "upserts": created_or_updated}
