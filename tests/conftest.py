@@ -53,7 +53,18 @@ async def test_engine(test_database_url: str):
 
     engine = create_async_engine(test_database_url, pool_pre_ping=True)
     async with engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    CREATE EXTENSION IF NOT EXISTS vector;
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$;
+                """
+            )
+        )
         await conn.run_sync(Base.metadata.create_all)
 
     yield engine

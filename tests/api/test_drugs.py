@@ -16,10 +16,17 @@ from apps.api.models.drug import Drug
 
 
 @pytest.mark.asyncio
-async def test_cursor_pagination_is_consistent(test_client, test_user_factory, test_drug_factory, auth_header) -> None:
-    user = await test_user_factory(role=UserRole.VIEWER, email="pagination@example.com")
+async def test_cursor_pagination_is_consistent(
+    test_client,
+    test_user_factory,
+    test_drug_factory,
+    test_org_factory,
+    auth_header,
+) -> None:
+    org = await test_org_factory(name="Pagination Org")
+    user = await test_user_factory(role=UserRole.VIEWER, organization=org, email="pagination@example.com")
     for idx in range(25):
-        await test_drug_factory(name=f"Drug-{idx:02d}")
+        await test_drug_factory(name=f"Drug-{idx:02d}", organization=org)
 
     seen: set[str] = set()
     cursor = None

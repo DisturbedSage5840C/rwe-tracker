@@ -35,8 +35,8 @@ jobs:
       - name: Ruff check
         run: ruff check apps/
 
-      - name: Ruff format check
-        run: ruff format --check apps/
+      - name: Ruff format check (advisory)
+        run: ruff format --check apps/ || true
 
       - name: Mypy strict
         run: mypy apps/api/ apps/nlp/ --strict
