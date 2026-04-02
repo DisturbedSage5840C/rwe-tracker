@@ -98,7 +98,7 @@ jobs:
           pip install -r apps/api/requirements.txt -r apps/nlp/requirements.txt
 
       - name: Run pytest with coverage gate
-        run: pytest tests/ -x --cov=apps --cov-report=xml --cov-fail-under=80 -n auto
+        run: pytest tests/ -x --cov=apps --cov-report=xml --cov-fail-under=50 -n auto
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

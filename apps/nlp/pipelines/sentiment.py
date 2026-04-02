@@ -8,8 +8,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from apps.common.logging import get_logger
 from apps.nlp.config import NLPSettings
 from apps.nlp.schemas import AspectResult, SentimentResult

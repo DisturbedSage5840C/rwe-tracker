@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Provide deterministic test defaults for settings that are required at import time.
@@ -52,6 +53,7 @@ async def test_engine(test_database_url: str):
 
     engine = create_async_engine(test_database_url, pool_pre_ping=True)
     async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 
     yield engine
