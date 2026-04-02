@@ -56,9 +56,10 @@ class PharmaSentimentPipeline:
         custom_lexicon = json.loads(lexicon_path.read_text(encoding="utf-8"))
         self.vader.lexicon.update(custom_lexicon)
 
-        model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        model_name = self.settings.transformer_model_name
+        model_revision = self.settings.transformer_model_revision
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=model_revision)
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_name, revision=model_revision)
         self.classifier = pipeline(
             "sentiment-analysis",
             model=self.model,
