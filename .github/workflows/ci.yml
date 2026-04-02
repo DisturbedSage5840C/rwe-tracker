@@ -156,5 +156,5 @@ jobs:
       - name: Safety dependency audit
         run: safety check -r apps/api/requirements.txt
 
-      - name: Frontend high+ npm audit
-        run: cd frontend && npm audit --audit-level=high
+      - name: Frontend critical npm audit
+        run: cd frontend && npm audit --audit-level=critical

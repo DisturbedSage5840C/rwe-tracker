@@ -35,6 +35,7 @@ export default function DashboardPage() {
 
   const { status, progress } = usePollingJob(jobId, selectedDrug?.id ?? "");
   const analysis = useDrugAnalysis(selectedDrug?.id ?? "");
+  const { report, refresh } = analysis;
   const normalizedStatus = status.toLowerCase();
   const isJobInFlight = Boolean(jobId) && (normalizedStatus === "pending" || normalizedStatus === "running");
   const systemStatus = useSWR(
@@ -108,7 +109,7 @@ export default function DashboardPage() {
     if (normalizedStatus !== "success" && normalizedStatus !== "completed") {
       return;
     }
-    if (analysis.report) {
+    if (report) {
       setIsSyncingReport(false);
       setSyncAttempts(0);
       return;
@@ -126,7 +127,7 @@ export default function DashboardPage() {
           return;
         }
         setSyncAttempts(attempt);
-        const refreshed = await analysis.refresh();
+        const refreshed = await refresh();
         if (refreshed.report) {
           setIsSyncingReport(false);
           setSyncAttempts(0);
@@ -144,7 +145,7 @@ export default function DashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [analysis.refresh, analysis.report, isSyncingReport, jobId, normalizedStatus]);
+  }, [isSyncingReport, jobId, normalizedStatus, refresh, report]);
 
   const isTerminalJob = normalizedStatus === "success" || normalizedStatus === "completed";
   const shouldShowResults = Boolean(selectedDrug && analysis.report);
